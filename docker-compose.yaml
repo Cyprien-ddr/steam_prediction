@@ -19,7 +19,7 @@ services:
       - mongodb
     environment:
       MONGO_URI: "mongodb://root:example@mongodb:27017/"
-    command: sh -c "sleep 10 && python main.py"
+    command: sh -c "python main.py"
 
 volumes:
   mongodb_data:
