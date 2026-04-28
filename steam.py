@@ -35,10 +35,9 @@ def get_all_steam_apps(api_key = None):
     last_appid = 0
 
     while True:
-        # TODO - Update the params to get only games
         params = {
             'key': api_key,
-            'max_results': 4,
+            'max_results': 50000,
             'include_games': 1,
             'include_dlc': 0,
             'include_software': 0,
@@ -67,7 +66,5 @@ def get_all_steam_apps(api_key = None):
                     "name": item["name"]
                 })
         all_apps_bis.extend(final_list)
-        break
 
     return all_apps_bis
-    # return all_apps
