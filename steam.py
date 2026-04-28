@@ -1,27 +1,9 @@
 import os
 import time
-
 import requests
 from dotenv import load_dotenv
 
-def is_real_game(appid):
-    url = "https://store.steampowered.com/api/appdetails"
-    params = {
-        "appids": appid
-    }
-
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-
-    app_data = data.get(str(appid), {})
-    if not app_data.get("success"):
-        return False
-
-    game_data = app_data.get("data", {})
-    return game_data.get("type") == "game"
-
-def get_all_steam_apps(api_key = None):
+def get_all_steam_apps(api_key=None):
     load_dotenv()
     if not api_key:
         api_key = os.getenv('STEAM_API_KEY')
@@ -30,10 +12,10 @@ def get_all_steam_apps(api_key = None):
 
     url = 'https://api.steampowered.com/IStoreService/GetAppList/v1/'
     all_apps = []
-    all_apps_bis = []
-    filtered_apps = []
     last_appid = 0
 
+    print("Téléchargement de la liste globale Steam...")
+    
     while True:
         params = {
             'key': api_key,
@@ -51,20 +33,16 @@ def get_all_steam_apps(api_key = None):
         data = response.json()
 
         apps = data.get('response', {}).get('apps', [])
-        print(apps)
-        final_list = [{'appid': item['appid'], 'name': item['name']} for item in apps]
+        
+        # LA LIGNE CORRIGÉE : On garde bien ta structure d'origine complète !
+        final_list = [{'appid': item['appid'], 'name': item['name'], 'last_modified': item.get('last_modified'), 'price_change_number': item.get('price_change_number')} for item in apps]
+        
         all_apps.extend(final_list)
+        
         if data['response'].get('have_more_results'):
             last_appid = data['response']['last_appid']
             time.sleep(0.5)
         else:
             break
-        for item in apps:
-            if is_real_game(item["appid"]):
-                filtered_apps.append({
-                    "appid": item["appid"],
-                    "name": item["name"]
-                })
-        all_apps_bis.extend(final_list)
-
-    return all_apps_bis
+            
+    return all_apps

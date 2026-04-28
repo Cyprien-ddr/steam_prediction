@@ -4,7 +4,7 @@ from deals import IsThereAnyDeal
 from steam import get_all_steam_apps
 
 def main():
-    myclient = pymongo.MongoClient("mongodb://root:example@mongodb:27017/")
+    myclient = pymongo.MongoClient("mongodb://root:example@localhost:27017/")
     steam_namedb = myclient["stea_prediction"]
     steam_namecol = steam_namedb["games"]
     print("Connected to MongoDB!")
