@@ -1,9 +1,7 @@
-#!/usr/bin/env python
-from symtable import Class
-
 import requests
 import os
-import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from pymongo import UpdateOne
 
@@ -15,7 +13,6 @@ class IsThereAnyDeal(object):
         self.db = db_name
         self.api_key = os.getenv('API_KEY')
         self.base_url = 'https://api.isthereanydeal.com'
-        self.since_year = 2016
         self.get_games_info()
 
     @staticmethod
@@ -28,183 +25,167 @@ class IsThereAnyDeal(object):
             params.update(extra)
         return params
 
-    def get_games_info(self):
-        titles_to_search = list(self.db.find(
-            { 'name': { '$ne': None } },
-            {'name':1, '_id':0}))
-        operations = []
-        all_game_ids = []
-        games = None
-        for title in titles_to_search:
-            title_name = title.get('name')
+    def chunk_list(self, lst, size=50): # J'ai réduit la taille des paquets à 50 pour soulager l'API
+        """Split a list into chunks of max `size`"""
+        for i in range(0, len(lst), size):
+            yield lst[i:i + size]
+
+    def _safe_request(self, method: str, url: str, **kwargs):
+        """Helper function to handle rate limits (429) automatically with retries."""
+        max_retries = 4
+        for attempt in range(max_retries):
+            response = requests.request(method, url, **kwargs)
+            
+            # Si on se fait bloquer par la limite de requêtes
+            if response.status_code == 429:
+                wait_time = (attempt + 1) * 3  # Va attendre 3s, puis 6s, puis 9s...
+                print(f"⚠️ Erreur 429 (Trop de requêtes). Pause de {wait_time}s avant de réessayer...")
+                time.sleep(wait_time)
+                continue
+                
+            response.raise_for_status()
+            return response.json()
+            
+        # Si ça échoue toujours après les tentatives
+        response.raise_for_status()
+
+    def search_one(self, title_name: str):
+        """Search a single game on ITAD and return (title, itad_id) if found."""
+        try:
+            # Petite pause par défaut pour ne pas spammer
+            time.sleep(0.5) 
             games = self.search_games(title_name)
             for game in games:
                 if game['title'] == title_name and game['id']:
-                    operations.append(
-                        UpdateOne(
-                        {"name": title_name},
-                        {"$set": {"itad_id": game['id']}}
+                    return title_name, game['id']
+        except Exception as e:
+            print(f"Error searching '{title_name}': {e}")
+        return title_name, None
+
+    def get_games_info(self):
+        titles_to_search = list(self.db.find(
+            {'name': {'$ne': None}, 'itad_id': {'$exists': False}}, # On cherche seulement ceux qui n'ont pas encore d'ID !
+            {'name': 1, '_id': 0}
+        ))
+        title_names = [t.get('name') for t in titles_to_search if t.get('name')]
+
+        all_game_ids = []
+        operations = []
+
+        if title_names:
+            # On réduit les workers à 3 pour éviter de se faire bannir
+            print(f"Searching {len(title_names)} new games on ITAD (with rate limit protection)...")
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {executor.submit(self.search_one, name): name for name in title_names}
+                for future in as_completed(futures):
+                    title_name, itad_id = future.result()
+                    if itad_id:
+                        operations.append(UpdateOne(
+                            {"name": title_name},
+                            {"$set": {"itad_id": itad_id}}
                         ))
-                    all_game_ids.append(game['id'])
+                        all_game_ids.append(itad_id)
 
-        if not all_game_ids:
-            raise Exception(f'No game found in IsThereAnyDeal: {games}')
+            if operations:
+                self.db.bulk_write(operations)
+                print(f"{len(operations)} new ITAD IDs saved.")
+        else:
+            print("No new games to search on ITAD.")
 
-        self.db.bulk_write(operations)
-        overview = self.get_price_overview(all_game_ids)
+        # On récupère les IDs de toute la base pour mettre à jour les prix
+        all_itad_docs = list(self.db.find({'itad_id': {'$exists': True}}, {'itad_id': 1, '_id': 0}))
+        full_game_ids = [doc['itad_id'] for doc in all_itad_docs]
+
+        if not full_game_ids:
+            print("No games found on IsThereAnyDeal to fetch prices for.")
+            return
+
+        print(f"Fetching prices for {len(full_game_ids)} games...")
+        
+        overview = self.get_price_overview(full_game_ids)
         if overview:
             self.db.bulk_write(overview)
+            print("Price overview retrieved.")
 
-        current = self.get_current_prices(all_game_ids)
+        current = self.get_current_prices(full_game_ids)
         if current:
             self.db.bulk_write(current)
+            print("Current prices retrieved.")
 
-        hist_low = self.get_history_low(all_game_ids)
+        hist_low = self.get_history_low(full_game_ids)
         if hist_low:
             self.db.bulk_write(hist_low)
+            print("Historical lows retrieved.")
 
-        log_price = self.get_price_history_log(all_game_ids)
-        if log_price:
-            self.db.bulk_write(log_price)
+    def search_games(self, title: str, limit: int = 5) -> list[dict]:
+        url = f'{self.base_url}/games/search/v1'
+        params = self.build_params({'title': title, 'results': limit})
+
+        data = self._safe_request('GET', url, params=params)
+
+        return [
+            {
+                'id': game.get('id'),
+                'title': game.get('title'),
+            }
+            for game in data
+        ]
 
     def get_price_overview(self, game_ids: list, country: str = 'US') -> list:
         url = f'{self.base_url}/games/overview/v2'
         params = self.build_params({'country': country})
-
-        response = requests.post(url, params=params, json=game_ids)
-        response.raise_for_status()
-        data = response.json()
-
         operations = []
-        for game_data in data.get('prices', []):
-            game_id = game_data.get('id')
-            best_price = game_data.get('current')
-            hist_low = game_data.get('lowest')
-            operations.append(
-                UpdateOne(
+
+        for chunk in self.chunk_list(game_ids):
+            time.sleep(1) # Pause entre chaque paquet
+            data = self._safe_request('POST', url, params=params, json=chunk)
+            for game_data in data.get('prices', []):
+                game_id = game_data.get('id')
+                operations.append(UpdateOne(
                     {"itad_id": game_id},
-                    {"$set": {"best_price": best_price, "hist_low": hist_low}}
+                    {"$set": {"best_price": game_data.get('current'), "hist_low": game_data.get('lowest')}}
                 ))
         return operations
-
-    def search_games(self, title: str, limit: int = 20) -> list[dict]:
-        url = f'{self.base_url}/games/search/v1'
-        params = self.build_params({'title': title, 'results': limit})
-
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
-        games = []
-        for game in data:
-            games.append({
-                'id': game.get('id'),
-                'title': game.get('title'),
-                'type': game.get('type'),
-                'mature': game.get('mature', False),
-            })
-        return games
 
     def get_current_prices(self, game_ids: list, country: str = 'US') -> list:
         url = f'{self.base_url}/games/prices/v3'
         params = self.build_params({'country': country})
-
-        response = requests.post(url, params=params, json=game_ids)
-        response.raise_for_status()
-        data = response.json()
         operations = []
-        for item in data:
 
-            game_id = item.get('id')
-            deals = item.get('deals', [])
-
-            active_deals = []
-
-            for deal in deals:
-                price_new = deal.get('price')
-                price_old = deal.get('regular')
-                shop = deal.get('shop', {}).get('name', '?')
-                url_deal = deal.get('url', '')
-
-                active_deals.append({
-                    'shop': shop,
-                    'price': price_new,
-                    'regular_price': price_old,
-                    'url': url_deal,
-                })
-            operations.append(
-                UpdateOne(
+        for chunk in self.chunk_list(game_ids):
+            time.sleep(1) # Pause entre chaque paquet
+            data = self._safe_request('POST', url, params=params, json=chunk)
+            for item in data:
+                game_id = item.get('id')
+                active_deals = [
+                    {
+                        'shop': deal.get('shop', {}).get('name', '?'),
+                        'price': deal.get('price'),
+                        'regular_price': deal.get('regular'),
+                        'url': deal.get('url', ''),
+                    }
+                    for deal in item.get('deals', [])
+                ]
+                operations.append(UpdateOne(
                     {"itad_id": game_id},
                     {"$set": {"current_price": active_deals}}
                 ))
-
         return operations
 
-    def get_history_low(self, game_ids: list[str], country: str = 'US') -> list:
-
+    def get_history_low(self, game_ids: list, country: str = 'US') -> list:
         url = f'{self.base_url}/games/historylow/v1'
         params = self.build_params({'country': country})
-
-        response = requests.post(url, params=params, json=game_ids)
-        response.raise_for_status()
-        data = response.json()
-
         operations = []
-        for item in data:
-            game_id = item.get('id')
-            lows = item.get('historyLow', None)
-            if lows:
-                operations.append(
-                    UpdateOne(
+
+        for chunk in self.chunk_list(game_ids):
+            time.sleep(1) # Pause entre chaque paquet
+            data = self._safe_request('POST', url, params=params, json=chunk)
+            for item in data:
+                game_id = item.get('id')
+                lows = item.get('historyLow')
+                if lows:
+                    operations.append(UpdateOne(
                         {"itad_id": game_id},
                         {"$set": {"historical_low": lows}}
-                    ))
-        return operations
-
-    def get_price_history_log(self,
-                              game_ids: list[str],
-                              shop_id: str | None = None,
-                              country: str = 'US',
-                              since: str = '2016-01-01T00:00:00Z'
-                              ) -> list:
-        url = f'{self.base_url}/games/history/v2'
-        operations = []
-        for game_id in game_ids:
-            params = self.build_params({
-                'id': game_id,
-                'country': country,
-                'since': since,
-            })
-
-            if shop_id:
-                params['shop'] = shop_id
-
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-
-            entries_since = []
-
-            for item in data:
-                shop_name = item.get('shop', {}).get('name', None)
-                deal = item.get('deal', {})
-                ts = item.get('timestamp', '')
-
-                entries_since.append({
-                    'shop': shop_name,
-                    'date': ts,
-                    'price': deal.get('price', {}).get('amount', None),
-                })
-
-            entries_since.sort(
-                key=lambda x: x['date'],
-                reverse=True
-            )
-
-            if entries_since:
-                operations.append(
-                    UpdateOne(
-                        {"itad_id": game_id},
-                        {"$set": {"log_price": entries_since}}
                     ))
         return operations
