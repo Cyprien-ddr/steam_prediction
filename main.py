@@ -10,7 +10,7 @@ from utils import dump_backup
 
 DB_NAME = "steam_prediction"
 COLLECTION_NAME = "games"
-RESTORE_PATH = "./backups/base_2_tmp_246"
+RESTORE_PATH = "./backups/tmp_db_steam"
 
 
 def get_mongo_collection(collection_name=COLLECTION_NAME, db_name=DB_NAME):
@@ -53,8 +53,8 @@ def main():
     restore_backup()
 
     games_col = get_mongo_collection()
-    print(f"[MAIN] total docs: {games_col.count_documents({})}", flush=True)
-    IsThereAnyDeal(games_col)
+    # print(f"[MAIN] total docs: {games_col.count_documents({})}", flush=True)
+    # IsThereAnyDeal(games_col)
 
 
     dump_backup('end')
