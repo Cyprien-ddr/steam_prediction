@@ -11,10 +11,13 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: example
     volumes:
       - mongodb_data:/data/db
+      - ./backups:/backups
 
   python_app:
     build: .
     container_name: python_app
+    volumes:
+      - ./backups:/app/db
     depends_on:
       - mongodb
     environment:
